@@ -1,4 +1,6 @@
 local lash = {
+	classes      = {},
+	local        = {__name = true, __properties = true, __class = true},
 	_VERSION     = 'lash v0.1',
 	_DESCRIPTION = 'Lua OO library based on Classy with some tweaks',
 	_URL         = 'https://github.com/taroven/lash',
@@ -34,7 +36,6 @@ local pairs,ipairs = pairs,ipairs
 local table,string = table,string
 local concat = table.concat or concat
 local loadstring = loadstring or load
-local subclass
 
 -- index of allowed metamethods (__index is reserved)
 local metamethods = {
@@ -60,6 +61,21 @@ end
 
 local class_ipairs = function (self)
   return ipairs(classinfo[self].o_meta.__index)
+end
+
+local super_mt = {
+	__index = function (self, k) return self.__k[k] or self.__i[k] end,
+	__newindex = function (self, k, v)
+		self.__k[k] = v
+		self.__i[#self.__i + 1] = v
+	end,
+	__pairs = function (self) return pairs(self.__k) end,
+	__ipairs = function (self) return ipairs(self.__i) end,
+	__len = function (self) return #self.__i end,
+}
+
+local supertable = function ()
+	return setmetatable({__k = {}, __i = {}}, super_mt)
 end
 
 local constructor = function (self, ...)
@@ -103,7 +119,7 @@ local class_newindex = function (self, k, v)
     info.o_meta.__index.initialize = v
   
   -- Changed: Ignore .class instead of throwing an error
-  elseif k ~= "class" then
+  elseif not lash.local[k] then
     info.members[k] = v
     propagate(self, k)
     for sub in pairs(info.subclasses) do
@@ -120,6 +136,7 @@ local linearize = function (info)
 	local super = {}
   
   for i,parent in ipairs(info.supers) do
+  	--print("linearize",info.name,classinfo[parent].name)
     if classinfo[parent] then
     	super[#super + 1] = parent
     end
@@ -138,23 +155,26 @@ local linearize = function (info)
 end
 
 -- Classy does not provide methods for inheritance after birth.
--- This is a bit of a monkey patch, but it does the job nicely.
+-- This is a bit of a monkey patch, but it does the job.
+local mixin
 local include = function (self, ...)
 	local info = classinfo[self]
 	local index = classinfo[self].o_meta.__index
 	
 	local includes = {...}
+	for i,v in ipairs(includes) do
+		if type(v) == 'string' then
+			includes[i] = lash.require(v)
+		end
+	end
 	for i = #includes, 1, -1 do
 		local pinfo = classinfo[includes[i]]
-		if pinfo then
-			local exists
-			for _,v in ipairs(info.supers) do
-				if includes[i] == v then exists = true; break end
- 			end
- 			if not exists then
- 				table.insert(info.supers,1,includes[i])
- 			end
+		if pinfo then -- metatable abuse: info.supers is a lie.
+			--print("include",includes[i], pinfo)
+			info.supers[#info.supers + 1] = includes[i]
  			pinfo.subclasses[self] = self
+ 		else -- NTS: if we somehow run into classinfo[includes[i]] ceasing to exist between mixin -> include, something is very wrong with everything.
+ 			mixin(self, includes[i])
  		end
 	end
 	
@@ -169,11 +189,13 @@ local include = function (self, ...)
 end
 
 -- Non-class includes
-local mixin = function (self, ...)
+mixin = function (self, ...)
 	local mixins = {...}
 	for _,mixin in ipairs(mixins) do
-		if classinfo[mixin] then include(self,mixin) else
-			mixins[mixin] = mixin
+		if classinfo[mixin] then include(self,mixin)
+		elseif type(mixin) == "table" then
+			local info = classinfo[self]
+			info.mixins[mixin] = mixin
 			for k,v in pairs(mixin) do self[k] = v end
 		end
 	end
@@ -181,9 +203,11 @@ end
 
 -- create the necessary metadata for the class, setup the inheritance
 -- hierarchy, set a suitable metatable, and return the class
+local subclass
 local newclass = function (name, ...)
+  assert( not lash.classes[name], "class " .. name .. " already exists")
   assert( type( name ) == "string", "class name must be a string" )
-  local cls, index = {}, {}
+  local cls, index = {__properties = {}}, {}
   local o_meta = {
     __index = index,
     __name = name,
@@ -191,7 +215,7 @@ local newclass = function (name, ...)
   }
   local info = {
     name = name,
-    subclasses = setmetatable( {}, mode_k_meta ), -- subclass references for propagate()
+    subclasses = setmetatable( {}, weakmt ), -- subclass references for propagate()
     members = {}, -- k/v pairs added to object instances, either added or included
     supers = {}, -- Added: list of inherited classes for include()
     mixins = {}, -- Added: list of tables from mixin() (only for diagnostic purposes)
@@ -219,19 +243,72 @@ local newclass = function (name, ...)
   cls.propagate = propagate
   cls.subclass = subclass
   
+  mixin(cls, lash.classbase)
   include(cls, ...)
-  return setmetatable( cls, info.c_meta )
+  local final = setmetatable( cls, info.c_meta )
+  lash.classes[name] = final
+  return final
+end
+
+local tprint = function (...)
+	local t = {...}
+	for i,v in ipairs(t) do
+		print(i,type(v),tostring(v))
+	end
 end
 
 subclass = function (self, name, ...)
 	return newclass(name, self, ...)
 end
 
+local loadclasses = function (...)
+	local t = {}
+	for i = 1, select('#',...) do
+		local v = select(i,...)
+		if not lash.classes[v] then require(lash.classpath .. '.' .. v) end
+		t[#t + 1] = lash.classes[v]
+	end
+	return (unpack or table.unpack)(t)
+end
+
+lash.classbase = {}
 lash.classinfo = classinfo
+lash.classpath = "classes"
 lash.class = newclass
 lash.include = include
 lash.mixin = mixin
 lash.subclass = subclass
+lash.require = loadclasses
 
-setmetatable(lash, { __call = function (_, ...) return lash.class(...) end })
+local c = newclass("Object")
+c.Set = function (self, k, v, raw)
+	if (not raw) and type(v) == 'function' then v = v() end
+	self.__properties[k] = v
+	return self.__properties[k]
+end
+
+c.SafeSet = function (self, k, v, raw)
+	if type(self.__properties[k]) == 'nil' then
+		return self:Set(k,v)
+	end
+end
+
+c.Get = function (self, k, default, raw)
+	if (type(self.__properties[k]) == 'nil') and (type(default) ~= 'nil') then
+		self:Set(k,default,raw)
+	end
+	return self.__properties[k]
+end
+
+c.OptSet = function (self, k, v, default, raw)
+	if type(v) == 'nil' then
+		return self:Get(k,default,raw)
+	else
+		return self:Set(k,v,raw)
+	end
+end
+
+lash.Object = c
+
+setmetatable(lash, { __call = function (_, name, super, ...) return lash.subclass(super or lash.Object, name, ...) end })
 return lash
