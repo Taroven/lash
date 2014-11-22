@@ -108,16 +108,16 @@ end
 -- metamethods, initializers, and normal members. updates sub classes!
 local class_newindex = function (self, k, v)
   local info = classinfo[self]
-  
+
   -- Changed: Ignore replacement of existing metamethods instead of throwing an error
   if metamethods[k] and not info.o_meta[k] then
     info.o_meta[k] = v
-  
+
   -- Changed: initialize instead of __init, no more constructor shenanigans
   elseif key == "initialize" then
     info.members.initialize = v
     info.o_meta.__index.initialize = v
-  
+
   -- Changed: Ignore .class instead of throwing an error
   elseif not lash.local[k] then
     info.members[k] = v
@@ -134,7 +134,7 @@ end
 -- TODO: Fix this up a bit for cls:inherit() instead of rerunning it every time
 local linearize = function (info)
 	local super = {}
-  
+
   for i,parent in ipairs(info.supers) do
   	--print("linearize",info.name,classinfo[parent].name)
     if classinfo[parent] then
@@ -150,7 +150,7 @@ local linearize = function (info)
       super[#super + 1] = psuper[i]
     end
   end
-  
+
   return super
 end
 
@@ -160,7 +160,7 @@ local mixin
 local include = function (self, ...)
 	local info = classinfo[self]
 	local index = classinfo[self].o_meta.__index
-	
+
 	local includes = {...}
 	for i,v in ipairs(includes) do
 		if type(v) == 'string' then
@@ -177,14 +177,14 @@ local include = function (self, ...)
  			mixin(self, includes[i])
  		end
 	end
-	
+
 	info.super = linearize(info)
   for i = #info.super, 1, -1 do
     for k,v in pairs(classinfo[info.super[i]].members) do
       if k ~= "initialize" then index[k] = v end
     end
   end
-  
+
   return self
 end
 
@@ -234,15 +234,15 @@ local newclass = function (name, ...)
       --__metatable = false, -- No reason to block getmetatable()
     },
   }
-  
+
   index.__class = cls
   classinfo[cls] = info
-  
+
   cls.include = include
   cls.mixin = mixin
   cls.propagate = propagate
   cls.subclass = subclass
-  
+
   mixin(cls, lash.classbase)
   include(cls, ...)
   local final = setmetatable( cls, info.c_meta )
@@ -281,25 +281,35 @@ lash.subclass = subclass
 lash.require = loadclasses
 
 local c = newclass("Object")
+
+-- Directly set (or unset, using nil) a property.
+-- If 'v' is a function, the return of v() will be the final value unless 'raw' is used.
+-- Returns the final value.
 c.Set = function (self, k, v, raw)
+  local p = self.__properties
 	if (not raw) and type(v) == 'function' then v = v() end
-	self.__properties[k] = v
-	return self.__properties[k]
+	p[k] = v
+	return p[k]
 end
 
+-- See :Set, but will never overwrite a non-nil property.
+-- Note: See :Set for 'raw' functionality in all methods below.
 c.SafeSet = function (self, k, v, raw)
 	if type(self.__properties[k]) == 'nil' then
 		return self:Set(k,v)
 	end
 end
 
+-- Return a property. If the property is nil, this will call :Set(k, default, raw) first.
 c.Get = function (self, k, default, raw)
-	if (type(self.__properties[k]) == 'nil') and (type(default) ~= 'nil') then
+  local p = self.__properties
+	if (type(p[k]) == 'nil') then
 		self:Set(k,default,raw)
 	end
-	return self.__properties[k]
+	return p[k]
 end
 
+-- Combined :Get and :Set for situations where a function arg should update a property or set to a default value.
 c.OptSet = function (self, k, v, default, raw)
 	if type(v) == 'nil' then
 		return self:Get(k,default,raw)
